@@ -1,6 +1,10 @@
+version: '3.8'
+
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: tyrelink-postgres
+    restart: always
     environment:
       POSTGRES_DB: tyrelink
       POSTGRES_USER: tyrelink
@@ -8,7 +12,50 @@ services:
     ports:
       - "5434:5432"
     volumes:
-      - tyrelink-postgres:/var/lib/postgresql/data
-      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+      - tyrelink-postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tyrelink -d tyrelink"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: tyrelink-redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - tyrelink-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tyrelink-api
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DATABASE_URL: "postgres://tyrelink:tyrelink_dev_only@postgres:5432/tyrelink?sslmode=disable"
+      REDIS_URL: "redis://redis:6379/0"
+      TYRELINK_ADMIN_PASSWORD: "admin"
+      TYRELINK_SESSION_SECRET: "tyrelink-secure-session-key-dev-2026"
+      CORS_ALLOWED_ORIGINS: "http://localhost:4321,http://localhost:4322,http://localhost:3000,https://tyrelink.lk"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
-  tyrelink-postgres:
+  tyrelink-postgres-data:
+  tyrelink-redis-data:

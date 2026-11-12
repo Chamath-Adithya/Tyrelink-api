@@ -44,8 +44,6 @@ func main() {
 	mux.HandleFunc("GET /v1/products", h.GetProducts)
 	mux.HandleFunc("GET /v1/products/{id}", h.GetProductByID)
 	mux.HandleFunc("POST /v1/order-leads", h.CreateOrderLead)
-	mux.HandleFunc("GET /v1/warranty/{invoice}", h.GetWarranty)
-	mux.HandleFunc("GET /v1/orders/{id}", h.GetOrderTracking)
 
 	// Admin Auth
 	mux.HandleFunc("POST /v1/admin/login", h.AdminLogin)

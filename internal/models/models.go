@@ -63,36 +63,6 @@ type OrderLead struct {
 	Payload       map[string]any  `json:"payload,omitempty"`
 }
 
-type WarrantyRecord struct {
-	ID            string    `json:"id"`
-	InvoiceNumber string    `json:"invoiceNumber"`
-	DOTCode       string    `json:"dotCode,omitempty"`
-	ProductID     string    `json:"productId,omitempty"`
-	ProductName   string    `json:"productName,omitempty"`
-	CustomerName  string    `json:"customerName,omitempty"`
-	CustomerPhone string    `json:"customerPhone,omitempty"`
-	StartsAt      string    `json:"startsAt"`
-	EndsAt        string    `json:"endsAt"`
-	Status        string    `json:"status"` // 'active', 'expired', 'claimed'
-	CreatedAt     time.Time `json:"createdAt"`
-}
-
-type TrackingStep struct {
-	Status      string `json:"status"`
-	Title       string `json:"title"`
-	Location    string `json:"location"`
-	Timestamp   string `json:"timestamp"`
-	Description string `json:"description"`
-}
-
-type OrderTrack struct {
-	OrderRef      string         `json:"orderRef"`
-	CurrentStatus string         `json:"currentStatus"`
-	Courier       string         `json:"courier"`
-	EstimatedDate string         `json:"estimatedDate"`
-	Steps         []TrackingStep `json:"steps"`
-}
-
 type CampaignConfig struct {
 	FlashSale struct {
 		IsActive   bool     `json:"isActive"`
@@ -106,4 +76,3 @@ type CampaignConfig struct {
 		ProductIDs []string `json:"productIds"`
 	} `json:"trending"`
 }
-

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/solveo/tyrelink/backend/internal/cache"
@@ -422,80 +421,3 @@ func (h *Handlers) AdminDeleteProduct(w http.ResponseWriter, r *http.Request) {
 	_ = h.cache.FlushPattern(r.Context(), "tyrelink:product*")
 	middleware.JSONWrite(w, http.StatusOK, map[string]any{"success": true, "deleted": true, "id": id})
 }
-
-// GET /v1/warranty/{invoice}
-func (h *Handlers) GetWarranty(w http.ResponseWriter, r *http.Request) {
-	invoice := strings.TrimSpace(r.PathValue("invoice"))
-	// Sample authentic tyre warranty responses
-	if strings.EqualFold(invoice, "TL-DOT-9921") || strings.EqualFold(invoice, "TL-INV-9921") {
-		middleware.JSONWrite(w, http.StatusOK, map[string]any{
-			"invoice":       invoice,
-			"dotCode":       "TL-DOT-9921 (DOT 4524)",
-			"productName":   "Michelin Energy XM2+ 195/65 R15",
-			"customerName":  "Nalaka Jayasuriya (Horana)",
-			"customerPhone": "077 •••• 892",
-			"startsAt":      "2024-11-01",
-			"endsAt":        "2029-11-01",
-			"status":        "active",
-			"warrantyType":  "5 Year Official Manufacturer Warranty",
-		})
-		return
-	}
-
-	if strings.EqualFold(invoice, "TL-DOT-8840") {
-		middleware.JSONWrite(w, http.StatusOK, map[string]any{
-			"invoice":       invoice,
-			"dotCode":       "TL-DOT-8840 (DOT 3824)",
-			"productName":   "DSI S-Drive 185/65 R15",
-			"customerName":  "Kasun Perera (Gampaha)",
-			"customerPhone": "071 •••• 451",
-			"startsAt":      "2024-10-15",
-			"endsAt":        "2028-10-15",
-			"status":        "active",
-			"warrantyType":  "4 Year DSI Company Warranty",
-		})
-		return
-	}
-
-	middleware.JSONWrite(w, http.StatusOK, map[string]any{
-		"invoice": invoice,
-		"status":  "verification_required",
-		"message": "Invoice or DOT code recorded. A Tyrelink warranty specialist will verify manufacture dates on WhatsApp.",
-	})
-}
-
-// GET /v1/orders/{id}
-func (h *Handlers) GetOrderTracking(w http.ResponseWriter, r *http.Request) {
-	ref := strings.TrimSpace(r.PathValue("id"))
-
-	middleware.JSONWrite(w, http.StatusOK, map[string]any{
-		"orderRef":      ref,
-		"currentStatus": "Out for Delivery",
-		"carrier":       "Tyrelink Express Courier (All 25 Districts)",
-		"estimatedDate": "Today / Tomorrow",
-		"steps": []map[string]string{
-			{
-				"status":      "completed",
-				"title":       "Order Received & Tyre Allocated",
-				"location":    "Tyrelink Central Distribution Hub",
-				"timestamp":   "10 Nov 2026, 09:30 AM",
-				"description": "Tyre size & fitment verified by technical team.",
-			},
-			{
-				"status":      "completed",
-				"title":       "DOT & Tread Inspection Passed",
-				"location":    "QA Inspection Station",
-				"timestamp":   "10 Nov 2026, 02:15 PM",
-				"description": "Manufacture dates & factory bead seals checked.",
-			},
-			{
-				"status":      "current",
-				"title":       "Out for Islandwide Courier Delivery",
-				"location":    "En route to customer delivery address",
-				"timestamp":   "11 Nov 2026, 08:45 AM",
-				"description": "Cash on Delivery (COD) cash/card payment upon delivery.",
-			},
-		},
-	})
-}
-

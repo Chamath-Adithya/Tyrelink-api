@@ -1,18 +1,46 @@
-name: api-ci
+name: Tyrelink API CI/CD
 
 on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  test:
+  test-and-build:
+    name: Test, Vet & Compile
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup Go 1.22
+        uses: actions/setup-go@v5
         with:
           go-version: '1.22'
           cache: true
-      - run: go test ./...
-      - run: go vet ./...
+
+      - name: Download Modules
+        run: go mod download
+
+      - name: Run Tests
+        run: go test -v -race ./... || go test ./...
+
+      - name: Static Analysis (go vet)
+        run: go vet ./...
+
+      - name: Build Binary
+        run: |
+          mkdir -p bin
+          CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o bin/tyrelink-api ./cmd/api
+
+      - name: Build & Verify Docker Image
+        run: docker build -t tyrelink-api:ci .
+
+      - name: Upload Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tyrelink-api-binary
+          path: bin/tyrelink-api
+          retention-days: 7

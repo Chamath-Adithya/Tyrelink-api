@@ -45,6 +45,15 @@ func main() {
 	mux.HandleFunc("GET /v1/products/{id}", h.GetProductByID)
 	mux.HandleFunc("POST /v1/order-leads", h.CreateOrderLead)
 
+	mux.HandleFunc("GET /v1/products/{id}/reviews", h.GetReviews)
+	mux.HandleFunc("POST /v1/products/{id}/reviews", h.CreateReview)
+	mux.HandleFunc("GET /v1/delivery-rates", h.GetDeliveryRates)
+	mux.HandleFunc("GET /v1/admin/reviews", mw.RequireAdmin(h.GetReviews))
+	mux.HandleFunc("PUT /v1/admin/reviews/{id}", mw.RequireAdmin(h.ModerateReview))
+	mux.HandleFunc("PUT /v1/admin/delivery-rates", mw.RequireAdmin(h.SaveDeliveryRate))
+
+	mux.HandleFunc("GET /v1/admin/catalog", mw.RequireAdmin(h.AdminCatalog))
+	mux.HandleFunc("PUT /v1/admin/catalog", mw.RequireAdmin(h.AdminBulkCatalog))
 	// Admin Auth
 	mux.HandleFunc("POST /v1/admin/login", h.AdminLogin)
 	mux.HandleFunc("GET /v1/admin/verify", mw.RequireAdmin(h.AdminVerify))

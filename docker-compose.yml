@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -49,7 +47,7 @@ services:
       REDIS_URL: "redis://redis:6379/0"
       TYRELINK_ADMIN_PASSWORD: "admin"
       TYRELINK_SESSION_SECRET: "tyrelink-secure-session-key-dev-2026"
-      CORS_ALLOWED_ORIGINS: "http://localhost:4321,http://localhost:4322,http://localhost:3000,https://tyrelink.lk"
+      CORS_ALLOWED_ORIGINS: "http://localhost:4321,http://127.0.0.1:4321,http://localhost:4322,http://localhost:3000,https://tyrelink.lk"
     depends_on:
       postgres:
         condition: service_healthy

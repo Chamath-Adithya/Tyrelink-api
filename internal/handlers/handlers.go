@@ -63,7 +63,7 @@ func (h *Handlers) GetProducts(w http.ResponseWriter, r *http.Request) {
 		       price_minor, coalesce(original_price_minor, 0), coalesce(featured_image, '/hero-tyre.png'),
 		       coalesce(specs, '{}'::jsonb), coalesce(short_description, ''), stock_count, in_stock,
 		       is_featured, is_best_seller, is_flash_deal, coalesce(flash_discount, 0),
-		       coalesce(warranty, 'Manufacturer Warranty'), rating, review_count, max_order_quantity, published, created_at, updated_at
+		       coalesce(warranty, 'Manufacturer Warranty'), rating, review_count, max_order_quantity, published, created_at, updated_at, coalesce(youtube_review_id,'')
 		FROM products
 		WHERE published=true
 		ORDER BY created_at DESC
@@ -84,7 +84,7 @@ func (h *Handlers) GetProducts(w http.ResponseWriter, r *http.Request) {
 			&p.ID, &p.SKU, &p.Slug, &p.Brand, &p.Name, &p.SinhalaTitle, &p.Category, &p.Size,
 			&p.PriceMinor, &p.OriginalPriceMinor, &p.FeaturedImage, &specsRaw, &p.ShortDescription,
 			&p.StockCount, &p.InStock, &p.IsFeatured, &p.IsBestSeller, &p.IsFlashDeal, &p.FlashDealDiscount,
-			&p.Warranty, &p.Rating, &p.ReviewCount, &p.MaxOrderQuantity, &p.Published, &p.CreatedAt, &p.UpdatedAt,
+			&p.Warranty, &p.Rating, &p.ReviewCount, &p.MaxOrderQuantity, &p.Published, &p.CreatedAt, &p.UpdatedAt, &p.YouTubeReviewID,
 		)
 		if err == nil {
 			p.Price = p.PriceMinor / 100
@@ -129,14 +129,14 @@ func (h *Handlers) GetProductByID(w http.ResponseWriter, r *http.Request) {
 		       price_minor, coalesce(original_price_minor, 0), coalesce(featured_image, '/hero-tyre.png'),
 		       coalesce(specs, '{}'::jsonb), coalesce(short_description, ''), stock_count, in_stock,
 		       is_featured, is_best_seller, is_flash_deal, coalesce(flash_discount, 0),
-		       coalesce(warranty, 'Manufacturer Warranty'), rating, review_count, max_order_quantity, published, created_at, updated_at
+		       coalesce(warranty, 'Manufacturer Warranty'), rating, review_count, max_order_quantity, published, created_at, updated_at, coalesce(youtube_review_id,'')
 		FROM products
 		WHERE (id=$1 OR slug=$1) AND published=true
 	`, id).Scan(
 		&p.ID, &p.SKU, &p.Slug, &p.Brand, &p.Name, &p.SinhalaTitle, &p.Category, &p.Size,
 		&p.PriceMinor, &p.OriginalPriceMinor, &p.FeaturedImage, &specsRaw, &p.ShortDescription,
 		&p.StockCount, &p.InStock, &p.IsFeatured, &p.IsBestSeller, &p.IsFlashDeal, &p.FlashDealDiscount,
-		&p.Warranty, &p.Rating, &p.ReviewCount, &p.MaxOrderQuantity, &p.Published, &p.CreatedAt, &p.UpdatedAt,
+		&p.Warranty, &p.Rating, &p.ReviewCount, &p.MaxOrderQuantity, &p.Published, &p.CreatedAt, &p.UpdatedAt, &p.YouTubeReviewID,
 	)
 	if err != nil {
 		if mem, ok := h.db.GetMemoryProductByID(id); ok {
@@ -353,13 +353,14 @@ func (h *Handlers) AdminCreateProduct(w http.ResponseWriter, r *http.Request) {
 		specsJSON, _ := json.Marshal(p.Specs)
 		imagesJSON, _ := json.Marshal(p.Images)
 		_, err := h.db.Pool.Exec(r.Context(), `
-			INSERT INTO products (id, sku, slug, brand, name, sinhala_title, category, size, price_minor, original_price_minor, featured_image, images, specs, short_description, stock_count, in_stock, is_featured, is_best_seller, is_flash_deal, flash_discount, warranty, published, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, true, now(), now())
+			INSERT INTO products (id, sku, slug, brand, name, sinhala_title, category, size, price_minor, original_price_minor, featured_image, images, specs, short_description, stock_count, in_stock, is_featured, is_best_seller, is_flash_deal, flash_discount, warranty, published, created_at, updated_at, youtube_review_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, true, now(), now(), $22)
 			ON CONFLICT (id) DO UPDATE SET
 			  name = EXCLUDED.name, brand = EXCLUDED.brand, price_minor = EXCLUDED.price_minor, stock_count = EXCLUDED.stock_count, specs = EXCLUDED.specs, updated_at = now()
-		`, p.ID, p.SKU, p.Slug, p.Brand, p.Name, p.SinhalaTitle, p.Category, p.Size, p.PriceMinor, p.OriginalPriceMinor, p.FeaturedImage, imagesJSON, specsJSON, p.ShortDescription, p.StockCount, p.InStock, p.IsFeatured, p.IsBestSeller, p.IsFlashDeal, p.FlashDealDiscount, p.Warranty)
+		`, p.ID, p.SKU, p.Slug, p.Brand, p.Name, p.SinhalaTitle, p.Category, p.Size, p.PriceMinor, p.OriginalPriceMinor, p.FeaturedImage, imagesJSON, specsJSON, p.ShortDescription, p.StockCount, p.InStock, p.IsFeatured, p.IsBestSeller, p.IsFlashDeal, p.FlashDealDiscount, p.Warranty, p.YouTubeReviewID)
 		if err != nil {
-			// Memory already updated
+			middleware.JSONError(w, http.StatusServiceUnavailable, "Product could not be saved to the database")
+			return
 		}
 	}
 
@@ -396,11 +397,12 @@ func (h *Handlers) AdminUpdateProduct(w http.ResponseWriter, r *http.Request) {
 			UPDATE products
 			SET name=$1, brand=$2, category=$3, size=$4, price_minor=$5, original_price_minor=$6,
 			    short_description=$7, stock_count=$8, in_stock=$9, is_featured=$10, is_best_seller=$11,
-			    is_flash_deal=$12, flash_discount=$13, specs=$14, updated_at=now()
+			    is_flash_deal=$12, flash_discount=$13, specs=$14, youtube_review_id=$16, featured_image=$17, warranty=$18, updated_at=now()
 			WHERE id=$15
-		`, p.Name, p.Brand, p.Category, p.Size, p.PriceMinor, p.OriginalPriceMinor, p.ShortDescription, p.StockCount, p.InStock, p.IsFeatured, p.IsBestSeller, p.IsFlashDeal, p.FlashDealDiscount, specsJSON, id)
+		`, p.Name, p.Brand, p.Category, p.Size, p.PriceMinor, p.OriginalPriceMinor, p.ShortDescription, p.StockCount, p.InStock, p.IsFeatured, p.IsBestSeller, p.IsFlashDeal, p.FlashDealDiscount, specsJSON, id, p.YouTubeReviewID, p.FeaturedImage, p.Warranty)
 		if err != nil {
-			// Memory already updated
+			middleware.JSONError(w, http.StatusServiceUnavailable, "Product could not be saved to the database")
+			return
 		}
 	}
 

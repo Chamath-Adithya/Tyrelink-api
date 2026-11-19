@@ -26,6 +26,9 @@ func main() {
 	// 1. Connect Database (Postgres with connection pool or memory fallback)
 	db := database.Connect(ctx, cfg.DatabaseURL)
 	defer db.Close()
+	if cfg.DatabaseURL != "" && !db.IsPostgres() {
+		log.Fatal("Configured database unavailable; exiting so the service can retry instead of serving a permanent memory fallback")
+	}
 
 	// 2. Connect Cache (Redis or in-memory fallback)
 	redisCache := cache.New(cfg.RedisURL)

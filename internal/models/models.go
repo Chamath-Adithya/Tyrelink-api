@@ -3,6 +3,7 @@ package models
 import "time"
 
 type Product struct {
+	YouTubeReviewID    string         `json:"youtubeReviewId"`
 	ID                 string         `json:"id"`
 	SKU                string         `json:"sku"`
 	Slug               string         `json:"slug"`

@@ -1,0 +1,1 @@
+ALTER TABLE products ADD COLUMN IF NOT EXISTS youtube_review_id TEXT NOT NULL DEFAULT '';

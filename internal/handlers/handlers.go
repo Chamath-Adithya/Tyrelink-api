@@ -83,6 +83,29 @@ func hydrateProduct(p *models.Product, specsRaw, imagesRaw []byte) {
 	if p.Specs == nil {
 		p.Specs = map[string]any{}
 	}
+	if rawFaqs, ok := p.Specs["_faqs"]; ok {
+		if b, err := json.Marshal(rawFaqs); err == nil {
+			var parsed []models.ProductFAQ
+			if json.Unmarshal(b, &parsed) == nil && len(parsed) > 0 {
+				p.FAQs = parsed
+			}
+		}
+		delete(p.Specs, "_faqs")
+	}
+}
+
+func storageSpecsWithFAQs(p models.Product) map[string]any {
+	out := make(map[string]any, len(p.Specs)+1)
+	for k, v := range p.Specs {
+		if k == "_faqs" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(p.FAQs) > 0 {
+		out["_faqs"] = p.FAQs
+	}
+	return out
 }
 
 // Health Check
@@ -631,6 +654,18 @@ func normalizeIncomingProduct(p *models.Product) error {
 	if p.Specs == nil {
 		p.Specs = map[string]any{}
 	}
+	delete(p.Specs, "_faqs")
+	if len(p.FAQs) > 0 {
+		cleaned := make([]models.ProductFAQ, 0, len(p.FAQs))
+		for _, f := range p.FAQs {
+			q := strings.TrimSpace(f.Question)
+			a := strings.TrimSpace(f.Answer)
+			if q != "" && a != "" {
+				cleaned = append(cleaned, models.ProductFAQ{Question: q, Answer: a})
+			}
+		}
+		p.FAQs = cleaned
+	}
 	if p.Size != "" {
 		if _, ok := p.Specs["Size"]; !ok {
 			p.Specs["Size"] = p.Size
@@ -664,7 +699,7 @@ func (h *Handlers) AdminCreateProduct(w http.ResponseWriter, r *http.Request) {
 	h.db.SaveMemoryProduct(p)
 
 	if h.db.IsPostgres() {
-		specsJSON, _ := json.Marshal(p.Specs)
+		specsJSON, _ := json.Marshal(storageSpecsWithFAQs(p))
 		imagesJSON, _ := json.Marshal(p.Images)
 		_, err := h.db.Pool.Exec(r.Context(), `
 			INSERT INTO products (
@@ -740,7 +775,7 @@ func (h *Handlers) AdminUpdateProduct(w http.ResponseWriter, r *http.Request) {
 	h.db.SaveMemoryProduct(p)
 
 	if h.db.IsPostgres() {
-		specsJSON, _ := json.Marshal(p.Specs)
+		specsJSON, _ := json.Marshal(storageSpecsWithFAQs(p))
 		imagesJSON, _ := json.Marshal(p.Images)
 		tag, err := h.db.Pool.Exec(r.Context(), `
 			UPDATE products

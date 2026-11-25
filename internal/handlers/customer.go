@@ -42,7 +42,7 @@ func (h *Handlers) recomputeProductRating(ctx context.Context, productID string)
 	}
 	_, _ = h.db.Pool.Exec(ctx, `
 		UPDATE products p
-		SET rating = COALESCE(sub.avg_rating, 4.8),
+		SET rating = COALESCE(sub.avg_rating, 0),
 		    review_count = sub.total_reviews,
 		    updated_at = now()
 		FROM (
@@ -278,9 +278,10 @@ func (h *Handlers) AdminCatalog(w http.ResponseWriter, r *http.Request) {
 			'images', coalesce(images, '["/hero-tyre.png"]'::jsonb),
 			'warranty', coalesce(warranty, 'Manufacturer Warranty'),
 			'youtubeReviewId', coalesce(youtube_review_id, ''),
-			'rating', coalesce(rating, 4.8),
+			'rating', coalesce(rating, 0),
 			'reviewCount', coalesce(review_count, 0),
-			'specs', coalesce(specs, '{}'::jsonb),
+			'faqs', specs->'_faqs',
+			'specs', coalesce(specs, '{}'::jsonb) - '_faqs',
 			'updatedAt', updated_at
 		)
 		FROM products

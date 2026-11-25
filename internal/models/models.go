@@ -2,6 +2,11 @@ package models
 
 import "time"
 
+type ProductFAQ struct {
+	Question string `json:"question"`
+	Answer   string `json:"answer"`
+}
+
 type Product struct {
 	YouTubeReviewID    string         `json:"youtubeReviewId"`
 	ID                 string         `json:"id"`
@@ -22,6 +27,7 @@ type Product struct {
 	FeaturedImage      string         `json:"featuredImage"`
 	Images             []string       `json:"images"`
 	Specs              map[string]any `json:"specs"`
+	FAQs               []ProductFAQ   `json:"faqs,omitempty"`
 	ShortDescription   string         `json:"shortDescription,omitempty"`
 	SinhalaDescription string         `json:"sinhalaDescription,omitempty"`
 	StockCount         int            `json:"stockCount"`

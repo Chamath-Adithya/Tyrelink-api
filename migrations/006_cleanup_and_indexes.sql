@@ -13,3 +13,4 @@ WHERE warranty <> '';
 
 CREATE INDEX IF NOT EXISTS idx_products_category_brand_pub
   ON products (published, category, brand);
+

@@ -1,11 +1,13 @@
 package middleware
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -218,6 +220,81 @@ func (m *Middleware) SecurityHeaders(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		next.ServeHTTP(w, r)
+	})
+}
+
+// CacheHeaders sets stale-while-revalidate caching on public reads and strict no-store on admin/writes
+func (m *Middleware) CacheHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if r.Method != http.MethodGet && r.Method != http.MethodHead || strings.HasPrefix(p, "/v1/admin") {
+			w.Header().Set("Cache-Control", "no-store")
+		} else if strings.HasPrefix(p, "/v1/products") || p == "/v1/campaigns" || p == "/v1/delivery-rates" {
+			w.Header().Set("Cache-Control", "public, max-age=30, stale-while-revalidate=120")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+var gzipPool = sync.Pool{
+	New: func() any {
+		gw, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+		return gw
+	},
+}
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gw          *gzip.Writer
+	wroteHeader bool
+	skipGzip    bool
+}
+
+func (g *gzipResponseWriter) WriteHeader(status int) {
+	if g.wroteHeader {
+		return
+	}
+	g.wroteHeader = true
+	if status == http.StatusNoContent || status == http.StatusNotModified {
+		g.skipGzip = true
+		g.ResponseWriter.Header().Del("Content-Encoding")
+	} else {
+		g.ResponseWriter.Header().Del("Content-Length")
+	}
+	g.ResponseWriter.WriteHeader(status)
+}
+
+func (g *gzipResponseWriter) Write(b []byte) (int, error) {
+	if !g.wroteHeader {
+		g.WriteHeader(http.StatusOK)
+	}
+	if g.skipGzip {
+		return g.ResponseWriter.Write(b)
+	}
+	return g.gw.Write(b)
+}
+
+// Gzip transparently compresses JSON responses (~75-85% bandwidth reduction for slow links)
+func (m *Middleware) Gzip(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead || !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Add("Vary", "Accept-Encoding")
+		w.Header().Set("Content-Encoding", "gzip")
+
+		gw := gzipPool.Get().(*gzip.Writer)
+		gw.Reset(w)
+		grw := &gzipResponseWriter{ResponseWriter: w, gw: gw}
+		defer func() {
+			if !grw.skipGzip && grw.wroteHeader {
+				_ = gw.Close()
+			}
+			gw.Reset(io.Discard)
+			gzipPool.Put(gw)
+		}()
+		next.ServeHTTP(grw, r)
 	})
 }
 

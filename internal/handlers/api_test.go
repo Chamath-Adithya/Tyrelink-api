@@ -213,3 +213,16 @@ func TestUntrustedClientCannotSpoofXForwardedForToBypassLoginLimit(t *testing.T)
 	}
 }
 
+func TestAdminCreateProductRejectsUnsafeImageScheme(t *testing.T) {
+	h, _ := newTestHandlers("SecretPass2026")
+
+	for _, badImg := range []string{"javascript:alert(1)", "data:image/svg+xml;base64,PHN2Zz4=", "data:text/html,hi"} {
+		w := httptest.NewRecorder()
+		body := `{"id":"bad-img-test","title":"Test Tyre","brand":"CEAT","price":12000,"featuredImage":"` + badImg + `"}`
+		h.AdminCreateProduct(w, httptest.NewRequest(http.MethodPost, "/v1/admin/products", bytes.NewBufferString(body)))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for unsafe image %q, got %d", badImg, w.Code)
+		}
+	}
+}
+

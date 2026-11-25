@@ -97,6 +97,26 @@ func hydrateProduct(p *models.Product, specsRaw, imagesRaw []byte) {
 	}
 }
 
+func isSafeImageRef(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(lower, "/") && !strings.HasPrefix(lower, "//") {
+		return true
+	}
+	if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "http://") {
+		return true
+	}
+	if (strings.HasPrefix(lower, "data:image/webp;base64,") ||
+		strings.HasPrefix(lower, "data:image/jpeg;base64,") ||
+		strings.HasPrefix(lower, "data:image/png;base64,")) && len(s) <= 220000 {
+		return true
+	}
+	return false
+}
+
 func storageSpecsWithFAQs(p models.Product) map[string]any {
 	out := make(map[string]any, len(p.Specs)+1)
 	for k, v := range p.Specs {
@@ -773,9 +793,22 @@ func normalizeIncomingProduct(p *models.Product) error {
 	}
 	if p.FeaturedImage == "" {
 		p.FeaturedImage = "/hero-tyre.png"
+	} else if !isSafeImageRef(p.FeaturedImage) {
+		return fmt.Errorf("invalid featuredImage scheme; use https://, /, or compressed raster base64")
 	}
 	if len(p.Images) == 0 {
 		p.Images = []string{p.FeaturedImage}
+	} else {
+		cleanImgs := make([]string, 0, len(p.Images))
+		for _, img := range p.Images {
+			if isSafeImageRef(img) {
+				cleanImgs = append(cleanImgs, strings.TrimSpace(img))
+			}
+		}
+		if len(cleanImgs) == 0 {
+			cleanImgs = []string{p.FeaturedImage}
+		}
+		p.Images = cleanImgs
 	}
 	if p.MaxOrderQuantity <= 0 {
 		p.MaxOrderQuantity = 4
@@ -802,8 +835,8 @@ func normalizeIncomingProduct(p *models.Product) error {
 	} else if s, ok := p.Specs["Size"].(string); ok {
 		p.Size = s
 	}
-	if p.Warranty == "" {
-		p.Warranty = "Manufacturer Warranty"
+	if p.Warranty != "" {
+		p.Warranty = ""
 	}
 	p.Currency = "LKR"
 	return nil
@@ -813,7 +846,7 @@ func normalizeIncomingProduct(p *models.Product) error {
 func (h *Handlers) AdminCreateProduct(w http.ResponseWriter, r *http.Request) {
 	var p models.Product
 	defer r.Body.Close()
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256000)).Decode(&p); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 512000)).Decode(&p); err != nil {
 		middleware.JSONError(w, http.StatusBadRequest, "invalid product body")
 		return
 	}
@@ -877,7 +910,7 @@ func (h *Handlers) AdminUpdateProduct(w http.ResponseWriter, r *http.Request) {
 	var rawMap map[string]any
 	defer r.Body.Close()
 
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256000))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 512000))
 	rawBytes, err := json.RawMessage{}, error(nil)
 	if err = dec.Decode(&rawBytes); err != nil {
 		middleware.JSONError(w, http.StatusBadRequest, "invalid product body")

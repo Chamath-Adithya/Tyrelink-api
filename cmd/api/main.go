@@ -83,8 +83,8 @@ func main() {
 	mux.HandleFunc("DELETE /v1/admin/reviews/{id}", mw.RequireAdmin(h.DeleteReview))
 	mux.HandleFunc("PUT /v1/admin/delivery-rates", mw.RequireAdmin(h.SaveDeliveryRate))
 
-	// Chain Middlewares: CORS -> Security Headers -> Rate Limiter -> Request Logging
-	handler := mw.CORS(mw.SecurityHeaders(mw.RateLimit(mw.Logging(mux))))
+	// Chain Middlewares: CORS -> Security Headers -> Cache-Control -> Gzip -> Rate Limiter -> Logging
+	handler := mw.CORS(mw.SecurityHeaders(mw.CacheHeaders(mw.Gzip(mw.RateLimit(mw.Logging(mux))))))
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

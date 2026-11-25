@@ -58,6 +58,17 @@ func (h *Handlers) GetReviews(w http.ResponseWriter, r *http.Request) {
 	if !h.customerDB(w) {
 		return
 	}
+	isAdminReq := strings.HasPrefix(r.URL.Path, "/v1/admin/")
+	productKey := strings.TrimSpace(r.PathValue("id"))
+	cacheKey := "tyrelink:product:reviews:" + productKey
+	if !isAdminReq && h.cache != nil {
+		var cached []review
+		if h.cache.Get(r.Context(), cacheKey, &cached) {
+			middleware.JSONWrite(w, 200, map[string]any{"data": cached, "cached": true})
+			return
+		}
+	}
+
 	query := `
 		SELECT pr.id, pr.product_id, pr.name, pr.rating, pr.body, pr.status, pr.created_at, pr.photo_data_url
 		FROM product_reviews pr
@@ -66,8 +77,8 @@ func (h *Handlers) GetReviews(w http.ResponseWriter, r *http.Request) {
 		ORDER BY pr.created_at DESC
 		LIMIT 100
 	`
-	args := []any{r.PathValue("id")}
-	if strings.HasPrefix(r.URL.Path, "/v1/admin/") {
+	args := []any{productKey}
+	if isAdminReq {
 		query = `SELECT id,product_id,name,rating,body,status,created_at,photo_data_url FROM product_reviews ORDER BY created_at DESC LIMIT 200`
 		args = nil
 	}
@@ -89,6 +100,9 @@ func (h *Handlers) GetReviews(w http.ResponseWriter, r *http.Request) {
 	if rows.Err() != nil {
 		middleware.JSONWrite(w, 500, map[string]string{"error": "Could not read reviews"})
 		return
+	}
+	if !isAdminReq && h.cache != nil {
+		_ = h.cache.Set(r.Context(), cacheKey, result, 2*time.Minute)
 	}
 	middleware.JSONWrite(w, 200, map[string]any{"data": result})
 }
@@ -207,12 +221,20 @@ func (h *Handlers) GetDeliveryRates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const flatCacheKey = "tyrelink:delivery:flat"
 	var v deliveryRate
+	if h.cache != nil && h.cache.Get(r.Context(), flatCacheKey, &v) {
+		middleware.JSONWrite(w, 200, map[string]any{"data": []deliveryRate{v}, "flatRate": v, "cached": true})
+		return
+	}
+
 	err := h.db.Pool.QueryRow(r.Context(), `
 		SELECT town, fee, estimate FROM delivery_rates ORDER BY (town='Islandwide') DESC, town LIMIT 1
 	`).Scan(&v.Town, &v.Fee, &v.Estimate)
 	if err != nil {
 		v = defaultRate
+	} else if h.cache != nil {
+		_ = h.cache.Set(r.Context(), flatCacheKey, v, 5*time.Minute)
 	}
 	middleware.JSONWrite(w, 200, map[string]any{"data": []deliveryRate{v}, "flatRate": v})
 }
@@ -242,7 +264,7 @@ func (h *Handlers) SaveDeliveryRate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.cache != nil {
-		_ = h.cache.Delete(r.Context(), "tyrelink:admin:stats")
+		_ = h.cache.Delete(r.Context(), "tyrelink:admin:stats", "tyrelink:delivery:flat")
 	}
 	h.recordAudit(r.Context(), "delivery.save_flat", "delivery_rate", "Islandwide", map[string]any{"fee": v.Fee, "estimate": est})
 	middleware.JSONWrite(w, 200, map[string]any{"success": true, "flatRate": deliveryRate{Town: "Islandwide", Fee: v.Fee, Estimate: est}})
@@ -312,43 +334,72 @@ func (h *Handlers) AdminBulkCatalog(w http.ResponseWriter, r *http.Request) {
 	if !h.customerDB(w) {
 		return
 	}
+	type bulkItem struct {
+		ID              string `json:"id"`
+		Price           int64  `json:"price"`
+		Stock           int    `json:"stockCount"`
+		Published       bool   `json:"published"`
+		ManufactureDate string `json:"manufactureDate"`
+	}
 	var data struct {
-		Items []struct {
-			ID              string `json:"id"`
-			Price           int64  `json:"price"`
-			Stock           int    `json:"stockCount"`
-			Published       bool   `json:"published"`
-			ManufactureDate string `json:"manufactureDate"`
-		} `json:"items"`
+		Items []bulkItem `json:"items"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 100000)).Decode(&data) != nil || len(data.Items) == 0 || len(data.Items) > 100 {
 		middleware.JSONWrite(w, 400, map[string]string{"error": "Choose 1–100 products"})
 		return
 	}
+	seen := make(map[string]bulkItem, len(data.Items))
 	for _, v := range data.Items {
-		if v.Price < 0 || v.Price > 100000000 || v.Stock < 0 || v.Stock > 100000 || len(v.ManufactureDate) > 80 {
+		if strings.TrimSpace(v.ID) == "" || v.Price < 0 || v.Price > 100000000 || v.Stock < 0 || v.Stock > 100000 || len(v.ManufactureDate) > 80 {
 			middleware.JSONWrite(w, 400, map[string]string{"error": "Invalid price, stock or manufacture date"})
 			return
 		}
+		seen[strings.TrimSpace(v.ID)] = v
 	}
+	uniqueItems := make([]bulkItem, 0, len(seen))
+	for _, v := range seen {
+		uniqueItems = append(uniqueItems, v)
+	}
+	payloadJSON, _ := json.Marshal(uniqueItems)
+
 	tx, err := h.db.Pool.Begin(r.Context())
 	if err != nil {
 		middleware.JSONWrite(w, 503, map[string]string{"error": "Could not begin update"})
 		return
 	}
 	defer tx.Rollback(r.Context())
-	for _, v := range data.Items {
-		tag, err := tx.Exec(r.Context(), `UPDATE products SET price_minor=$1,stock_count=$2,in_stock=($2>0),published=$3,specs=jsonb_set(coalesce(specs,'{}'::jsonb),'{Manufacture date}',to_jsonb($4::text)),updated_at=now() WHERE id=$5`, v.Price*100, v.Stock, v.Published, v.ManufactureDate, v.ID)
-		if err != nil || tag.RowsAffected() != 1 {
-			middleware.JSONWrite(w, 400, map[string]string{"error": "No products saved. Check selected product IDs."})
-			return
-		}
+
+	rows, err := tx.Query(r.Context(), `
+		UPDATE products AS p
+		SET price_minor = v.price * 100,
+		    stock_count = v."stockCount",
+		    in_stock = (v."stockCount" > 0),
+		    published = v.published,
+		    specs = jsonb_set(coalesce(p.specs, '{}'::jsonb), '{Manufacture date}', to_jsonb(v."manufactureDate"::text)),
+		    updated_at = now()
+		FROM jsonb_to_recordset($1::jsonb) AS v(id text, price bigint, "stockCount" int, published bool, "manufactureDate" text)
+		WHERE p.id = v.id
+		RETURNING p.id
+	`, payloadJSON)
+	if err != nil {
+		middleware.JSONWrite(w, 400, map[string]string{"error": "No products saved. Check selected product IDs."})
+		return
+	}
+	updatedCount := 0
+	for rows.Next() {
+		updatedCount++
+	}
+	rows.Close()
+
+	if updatedCount != len(uniqueItems) {
+		middleware.JSONWrite(w, 400, map[string]string{"error": "One or more selected product IDs were not found."})
+		return
 	}
 	if tx.Commit(r.Context()) != nil {
 		middleware.JSONWrite(w, 500, map[string]string{"error": "Update failed; reload before retrying"})
 		return
 	}
 	h.flushProductCache(r.Context())
-	h.recordAudit(r.Context(), "catalog.bulk_update", "product", "batch", map[string]any{"count": len(data.Items)})
+	h.recordAudit(r.Context(), "catalog.bulk_update", "product", "batch", map[string]any{"count": updatedCount})
 	middleware.JSONWrite(w, 200, map[string]bool{"success": true})
 }

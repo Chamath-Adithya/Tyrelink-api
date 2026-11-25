@@ -16,6 +16,7 @@ type Cache interface {
 	Set(ctx context.Context, key string, val any, ttl time.Duration) error
 	Delete(ctx context.Context, keys ...string) error
 	FlushPattern(ctx context.Context, pattern string) error
+	AllowRateLimit(ctx context.Context, key string, window time.Duration, maxHits int) (allowed bool, ok bool)
 	IsRedis() bool
 	Close() error
 }
@@ -154,4 +155,27 @@ func (c *hybridCache) FlushPattern(ctx context.Context, pattern string) error {
 	}
 	c.mu.Unlock()
 	return nil
+}
+
+var redisRateLimitScript = redis.NewScript(`
+local current = redis.call("INCR", KEYS[1])
+if current == 1 then
+  redis.call("PEXPIRE", KEYS[1], ARGV[1])
+end
+return current
+`)
+
+func (c *hybridCache) AllowRateLimit(ctx context.Context, key string, window time.Duration, maxHits int) (bool, bool) {
+	if !c.isRedis || c.rdb == nil {
+		return false, false
+	}
+	ms := window.Milliseconds()
+	if ms <= 0 {
+		ms = 60000
+	}
+	res, err := redisRateLimitScript.Run(ctx, c.rdb, []string{key}, ms).Int()
+	if err != nil {
+		return false, false
+	}
+	return res <= maxHits, true
 }

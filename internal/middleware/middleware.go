@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/solveo/tyrelink/backend/internal/cache"
 	"github.com/solveo/tyrelink/backend/internal/config"
 )
 
@@ -25,9 +26,11 @@ const (
 )
 
 type Middleware struct {
-	cfg          *config.Config
-	limiter      *rateLimiter
-	loginLimiter *rateLimiter
+	cfg            *config.Config
+	cache          cache.Cache
+	trustedNets    []*net.IPNet
+	limiter        *rateLimiter
+	loginLimiter   *rateLimiter
 }
 
 type rateLimiter struct {
@@ -82,26 +85,85 @@ func (rl *rateLimiter) allow(key string) bool {
 	return true
 }
 
-func New(cfg *config.Config) *Middleware {
+func New(cfg *config.Config, caches ...cache.Cache) *Middleware {
+	var c cache.Cache
+	if len(caches) > 0 {
+		c = caches[0]
+	}
+	var nets []*net.IPNet
+	for _, raw := range cfg.TrustedProxies {
+		if !strings.Contains(raw, "/") {
+			if ip := net.ParseIP(raw); ip != nil {
+				bits := 32
+				if ip.To4() == nil {
+					bits = 128
+				}
+				nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			}
+			continue
+		}
+		if _, cidr, err := net.ParseCIDR(raw); err == nil {
+			nets = append(nets, cidr)
+		}
+	}
 	return &Middleware{
 		cfg:          cfg,
+		cache:        c,
+		trustedNets:  nets,
 		limiter:      newRateLimiter(time.Minute, 180),
 		loginLimiter: newRateLimiter(5*time.Minute, 12),
 	}
 }
 
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first := strings.TrimSpace(strings.Split(xff, ",")[0])
-		if first != "" {
-			return first
+func (m *Middleware) isTrustedProxy(ipStr string) bool {
+	ip := net.ParseIP(strings.TrimSpace(ipStr))
+	if ip == nil {
+		return false
+	}
+	for _, cidr := range m.trustedNets {
+		if cidr.Contains(ip) {
+			return true
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil && host != "" {
-		return host
+	return false
+}
+
+// clientIP resolves the peer IP safely: ignores X-Forwarded-For unless RemoteAddr is
+// a trusted reverse proxy, and selects the rightmost untrusted hop to defeat spoofing.
+func (m *Middleware) clientIP(r *http.Request) string {
+	remoteHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || remoteHost == "" {
+		remoteHost = r.RemoteAddr
 	}
-	return r.RemoteAddr
+	if m.isTrustedProxy(remoteHost) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			for i := len(parts) - 1; i >= 0; i-- {
+				hop := strings.TrimSpace(parts[i])
+				if net.ParseIP(hop) != nil && !m.isTrustedProxy(hop) {
+					return hop
+				}
+			}
+			first := strings.TrimSpace(parts[0])
+			if net.ParseIP(first) != nil {
+				return first
+			}
+		}
+		if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(xri) != nil && !m.isTrustedProxy(xri) {
+			return xri
+		}
+	}
+	return remoteHost
+}
+
+func (m *Middleware) allowRequest(ctx context.Context, scope, ip string, mem *rateLimiter) bool {
+	if m.cache != nil {
+		key := "tyrelink:rl:" + scope + ":" + ip
+		if allowed, ok := m.cache.AllowRateLimit(ctx, key, mem.window, mem.maxHits); ok {
+			return allowed
+		}
+	}
+	return mem.allow(ip)
 }
 
 // ActorFromContext returns the authenticated admin role/actor for auditing
@@ -159,10 +221,10 @@ func (m *Middleware) SecurityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// RateLimit implements bounded sliding-window rate limiting
+// RateLimit implements bounded sliding-window rate limiting (Redis-backed when online)
 func (m *Middleware) RateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !m.limiter.allow(clientIP(r)) {
+		if !m.allowRequest(r.Context(), "global", m.clientIP(r), m.limiter) {
 			JSONError(w, http.StatusTooManyRequests, "rate limit exceeded, please retry in 60s")
 			return
 		}
@@ -173,7 +235,7 @@ func (m *Middleware) RateLimit(next http.Handler) http.Handler {
 // LoginRateLimit strictly limits admin authentication attempts against brute force
 func (m *Middleware) LoginRateLimit(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !m.loginLimiter.allow(clientIP(r)) {
+		if !m.allowRequest(r.Context(), "login", m.clientIP(r), m.loginLimiter) {
 			JSONError(w, http.StatusTooManyRequests, "too many login attempts; please wait 5 minutes")
 			return
 		}

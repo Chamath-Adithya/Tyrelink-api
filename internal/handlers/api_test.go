@@ -161,3 +161,55 @@ func TestProductFilteringAndCampaignsMemory(t *testing.T) {
 	}
 }
 
+func TestCreateOrderLeadEnforcesServerPriceAndRejectsUnknownProduct(t *testing.T) {
+	h, _ := newTestHandlers("test-pass")
+
+	// Reject unknown product ID
+	wBad := httptest.NewRecorder()
+	h.CreateOrderLead(wBad, httptest.NewRequest(http.MethodPost, "/v1/order-leads", bytes.NewBufferString(
+		`{"customerName":"Attacker","phone1":"0770000000","items":[{"id":"does-not-exist","price":1,"quantity":1}]}`,
+	)))
+	if wBad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown product, got %d: %s", wBad.Code, wBad.Body.String())
+	}
+
+	// Forged client price=1, courierCharge=0 must be overwritten by authoritative catalog price (18500*2 + 450)
+	wOk := httptest.NewRecorder()
+	h.CreateOrderLead(wOk, httptest.NewRequest(http.MethodPost, "/v1/order-leads", bytes.NewBufferString(
+		`{"customerName":"Kasun Silva","phone1":"0771112233","address":"Galle","items":[{"id":"tl-ceat-milaze-155","price":1,"quantity":2}],"subtotal":2,"courierCharge":0,"grandTotal":2}`,
+	)))
+	if wOk.Code != http.StatusCreated {
+		t.Fatalf("expected 201 created, got %d: %s", wOk.Code, wOk.Body.String())
+	}
+	leads := h.db.GetMemoryLeads()
+	if len(leads) == 0 || leads[0].Subtotal != 37000 || leads[0].CourierCharge != 450 || leads[0].GrandTotal != 37450 {
+		t.Fatalf("expected authoritative total 37450 (37000+450), got %+v", leads)
+	}
+}
+
+func TestUntrustedClientCannotSpoofXForwardedForToBypassLoginLimit(t *testing.T) {
+	h, mw := newTestHandlers("SecretPass2026")
+	guarded := mw.LoginRateLimit(h.AdminLogin)
+
+	for i := 0; i < 12; i++ {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/admin/login", bytes.NewBufferString(`{"password":"wrong"}`))
+		req.RemoteAddr = "198.51.100.25:54321"
+		req.Header.Set("X-Forwarded-For", "203.0.113."+string(rune('1'+i)))
+		guarded(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d expected 401, got %d", i+1, w.Code)
+		}
+	}
+
+	// 13th attempt from same untrusted public RemoteAddr with a fresh spoofed XFF header MUST hit 429
+	wBlocked := httptest.NewRecorder()
+	reqBlocked := httptest.NewRequest(http.MethodPost, "/v1/admin/login", bytes.NewBufferString(`{"password":"wrong"}`))
+	reqBlocked.RemoteAddr = "198.51.100.25:54321"
+	reqBlocked.Header.Set("X-Forwarded-For", "203.0.113.99")
+	guarded(wBlocked, reqBlocked)
+	if wBlocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 rate limit regardless of spoofed XFF, got %d", wBlocked.Code)
+	}
+}
+

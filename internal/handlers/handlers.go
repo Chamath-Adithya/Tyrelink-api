@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -60,10 +61,12 @@ func (h *Handlers) recordAudit(ctx context.Context, action, entityType, entityID
 	}
 	actor := middleware.ActorFromContext(ctx)
 	detailsJSON, _ := json.Marshal(details)
-	_, _ = h.db.Pool.Exec(ctx, `
+	if _, err := h.db.Pool.Exec(ctx, `
 		INSERT INTO audit_logs (id, actor, action, entity_type, entity_id, details, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, now())
-	`, randomHexID("aud", 8), actor, action, entityType, entityID, detailsJSON)
+	`, randomHexID("aud", 8), actor, action, entityType, entityID, detailsJSON); err != nil {
+		log.Printf("AUDIT WARN: failed recording %s (%s/%s): %v", action, entityType, entityID, err)
+	}
 }
 
 func hydrateProduct(p *models.Product, specsRaw, imagesRaw []byte) {
@@ -136,6 +139,64 @@ func (h *Handlers) GetProducts(w http.ResponseWriter, r *http.Request) {
 
 	hasFilters := cat != "" || brand != "" || search != "" || flashOnly || bestOnly || inStockOnly || limit > 0 || offset > 0
 
+	// Use indexed SQL pushdown when PostgreSQL is connected and filters/pagination are requested
+	if hasFilters && h.db.IsPostgres() {
+		sqlLimit := limit
+		if sqlLimit <= 0 || sqlLimit > 200 {
+			sqlLimit = 200
+		}
+		sqlOffset := offset
+		if sqlOffset < 0 {
+			sqlOffset = 0
+		}
+		rows, err := h.db.Pool.Query(ctx, `
+			SELECT id, sku, coalesce(slug, id), brand, name, coalesce(sinhala_title, ''), category, coalesce(size, ''),
+			       price_minor, coalesce(original_price_minor, 0), coalesce(featured_image, '/hero-tyre.png'),
+			       coalesce(images, '[]'::jsonb), coalesce(specs, '{}'::jsonb), coalesce(short_description, ''),
+			       stock_count, in_stock, is_featured, is_best_seller, is_flash_deal, coalesce(flash_discount, 0),
+			       coalesce(warranty, ''), rating, review_count, max_order_quantity,
+			       published, created_at, updated_at, coalesce(youtube_review_id,''),
+			       COUNT(*) OVER()::int AS total_count
+			FROM products
+			WHERE published = true
+			  AND ($1 = '' OR lower(category) = lower($1))
+			  AND ($2 = '' OR lower(brand) = lower($2))
+			  AND ($3 = false OR is_flash_deal = true)
+			  AND ($4 = false OR is_best_seller = true)
+			  AND ($5 = false OR in_stock = true)
+			  AND (
+			    $6 = ''
+			    OR to_tsvector('english', coalesce(name,'') || ' ' || coalesce(brand,'') || ' ' || coalesce(size,'') || ' ' || coalesce(category,'') || ' ' || coalesce(short_description,'')) @@ websearch_to_tsquery('english', $6)
+			    OR (name || ' ' || brand || ' ' || coalesce(size,'') || ' ' || category || ' ' || coalesce(short_description,'') || ' ' || sku) ILIKE '%' || $6 || '%'
+			  )
+			ORDER BY created_at DESC
+			LIMIT $7 OFFSET $8
+		`, cat, brand, flashOnly, bestOnly, inStockOnly, search, sqlLimit, sqlOffset)
+		if err == nil {
+			defer rows.Close()
+			filtered := []models.Product{}
+			total := 0
+			for rows.Next() {
+				var p models.Product
+				var specsRaw, imagesRaw []byte
+				var rowTotal int
+				if rows.Scan(
+					&p.ID, &p.SKU, &p.Slug, &p.Brand, &p.Name, &p.SinhalaTitle, &p.Category, &p.Size,
+					&p.PriceMinor, &p.OriginalPriceMinor, &p.FeaturedImage, &imagesRaw, &specsRaw, &p.ShortDescription,
+					&p.StockCount, &p.InStock, &p.IsFeatured, &p.IsBestSeller, &p.IsFlashDeal, &p.FlashDealDiscount,
+					&p.Warranty, &p.Rating, &p.ReviewCount, &p.MaxOrderQuantity, &p.Published, &p.CreatedAt, &p.UpdatedAt, &p.YouTubeReviewID,
+					&rowTotal,
+				) == nil {
+					total = rowTotal
+					hydrateProduct(&p, specsRaw, imagesRaw)
+					filtered = append(filtered, p)
+				}
+			}
+			middleware.JSONWrite(w, http.StatusOK, map[string]any{"data": filtered, "total": total, "cached": false})
+			return
+		}
+	}
+
 	cacheKey := "tyrelink:products:published"
 	items := []models.Product{}
 
@@ -153,7 +214,7 @@ func (h *Handlers) GetProducts(w http.ResponseWriter, r *http.Request) {
 			       price_minor, coalesce(original_price_minor, 0), coalesce(featured_image, '/hero-tyre.png'),
 			       coalesce(images, '[]'::jsonb), coalesce(specs, '{}'::jsonb), coalesce(short_description, ''),
 			       stock_count, in_stock, is_featured, is_best_seller, is_flash_deal, coalesce(flash_discount, 0),
-			       coalesce(warranty, 'Manufacturer Warranty'), rating, review_count, max_order_quantity,
+			       coalesce(warranty, ''), rating, review_count, max_order_quantity,
 			       published, created_at, updated_at, coalesce(youtube_review_id,'')
 			FROM products
 			WHERE published=true
@@ -319,33 +380,101 @@ func (h *Handlers) CreateOrderLead(w http.ResponseWriter, r *http.Request) {
 	payload.Address = strings.TrimSpace(payload.Address)
 	payload.PaymentMethod = strings.TrimSpace(payload.PaymentMethod)
 
-	if len(payload.CustomerName) < 2 || len(payload.Phone1) < 7 || len(payload.Items) == 0 {
-		middleware.JSONError(w, http.StatusBadRequest, "customerName, phone1, and at least 1 item are required")
-		return
-	}
-	if payload.Subtotal < 0 || payload.CourierCharge < 0 || payload.GrandTotal < 0 {
-		middleware.JSONError(w, http.StatusBadRequest, "order amounts cannot be negative")
+	if len(payload.CustomerName) < 2 || len(payload.Phone1) < 7 || len(payload.Items) == 0 || len(payload.Items) > 50 {
+		middleware.JSONError(w, http.StatusBadRequest, "customerName, phone1, and 1–50 items are required")
 		return
 	}
 	if payload.PaymentMethod == "" {
 		payload.PaymentMethod = "Cash on Delivery"
 	}
 
-	// Recompute subtotal safely if client omitted it
-	if payload.Subtotal == 0 {
-		var calc int64
-		for _, it := range payload.Items {
-			qty := int64(it.Quantity)
-			if qty <= 0 {
-				qty = 1
-			}
-			calc += it.Price * qty
+	// Authoritative server-side price & flat delivery calculation (never trust client-supplied prices)
+	type authProductInfo struct {
+		Title         string
+		Price         int64
+		MaxOrderQty   int
+		InStock       bool
+	}
+	catalogLookup := make(map[string]authProductInfo, len(payload.Items)*2)
+	idList := make([]string, 0, len(payload.Items))
+	for _, it := range payload.Items {
+		cleanID := strings.TrimSpace(it.ID)
+		if cleanID == "" {
+			middleware.JSONError(w, http.StatusBadRequest, "every order item requires a valid product id")
+			return
 		}
-		payload.Subtotal = calc
+		idList = append(idList, cleanID)
 	}
-	if payload.GrandTotal == 0 {
-		payload.GrandTotal = payload.Subtotal + payload.CourierCharge
+
+	var authoritativeCourier int64 = 450
+	if h.db.IsPostgres() {
+		pRows, err := h.db.Pool.Query(r.Context(), `
+			SELECT id, coalesce(slug, id), name, price_minor, max_order_quantity, in_stock
+			FROM products
+			WHERE published = true AND (id = ANY($1::text[]) OR slug = ANY($1::text[]))
+		`, idList)
+		if err != nil {
+			middleware.JSONError(w, http.StatusServiceUnavailable, "could not verify product pricing")
+			return
+		}
+		for pRows.Next() {
+			var pid, pslug, pname string
+			var priceMinor int64
+			var maxQty int
+			var inStock bool
+			if pRows.Scan(&pid, &pslug, &pname, &priceMinor, &maxQty, &inStock) == nil {
+				info := authProductInfo{Title: pname, Price: priceMinor / 100, MaxOrderQty: maxQty, InStock: inStock}
+				catalogLookup[pid] = info
+				catalogLookup[pslug] = info
+			}
+		}
+		pRows.Close()
+
+		var fee int64
+		if h.db.Pool.QueryRow(r.Context(), `SELECT fee FROM delivery_rates ORDER BY (town='Islandwide') DESC, town LIMIT 1`).Scan(&fee) == nil && fee >= 0 {
+			authoritativeCourier = fee
+		}
+	} else {
+		for _, id := range idList {
+			if p, ok := h.db.GetMemoryProductByID(id); ok {
+				info := authProductInfo{Title: p.Name, Price: p.Price, MaxOrderQty: p.MaxOrderQuantity, InStock: p.InStock}
+				catalogLookup[p.ID] = info
+				catalogLookup[p.Slug] = info
+			}
+		}
 	}
+
+	var calcSubtotal int64
+	for i := range payload.Items {
+		info, exists := catalogLookup[strings.TrimSpace(payload.Items[i].ID)]
+		if !exists {
+			middleware.JSONError(w, http.StatusBadRequest, "one or more selected products are unavailable")
+			return
+		}
+		qty := payload.Items[i].Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		maxAllowed := info.MaxOrderQty
+		if maxAllowed <= 0 {
+			maxAllowed = 20
+		}
+		if qty > maxAllowed {
+			qty = maxAllowed
+		}
+		payload.Items[i].Quantity = qty
+		payload.Items[i].Price = info.Price
+		if strings.TrimSpace(payload.Items[i].Title) == "" {
+			payload.Items[i].Title = info.Title
+		}
+		calcSubtotal += info.Price * int64(qty)
+	}
+	payload.Subtotal = calcSubtotal
+	if strings.Contains(strings.ToLower(payload.PaymentMethod), "pickup") {
+		authoritativeCourier = 0
+	}
+	payload.CourierCharge = authoritativeCourier
+	payload.GrandTotal = payload.Subtotal + payload.CourierCharge
 
 	leadID := randomHexID("lead_"+time.Now().UTC().Format("20060102150405"), 4)
 	if strings.TrimSpace(payload.OrderRef) == "" {

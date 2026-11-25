@@ -34,8 +34,8 @@ func main() {
 	redisCache := cache.New(cfg.RedisURL)
 	defer func() { _ = redisCache.Close() }()
 
-	// 3. Initialize Middleware
-	mw := middleware.New(cfg)
+	// 3. Initialize Middleware (with Redis rate limiting when available)
+	mw := middleware.New(cfg, redisCache)
 
 	// 4. Initialize Handlers
 	h := handlers.New(cfg, db, redisCache, mw)

@@ -9,6 +9,7 @@ type Product struct {
 	Slug               string         `json:"slug"`
 	Brand              string         `json:"brand"`
 	Name               string         `json:"name"`
+	Title              string         `json:"title"`
 	SinhalaTitle       string         `json:"sinhalaTitle,omitempty"`
 	Category           string         `json:"category"`
 	Size               string         `json:"size,omitempty"`
@@ -59,21 +60,57 @@ type OrderLead struct {
 	Subtotal      int64           `json:"subtotal"`
 	CourierCharge int64           `json:"courierCharge"`
 	GrandTotal    int64           `json:"grandTotal"`
-	Status        string          `json:"status"` // 'new', 'contacted', 'dispatched', 'delivered', 'cancelled'
+	Status        string          `json:"status"` // 'new', 'contacted', 'qualified', 'dispatched', 'delivered', 'cancelled', 'closed', 'spam'
+	AdminNotes    string          `json:"adminNotes,omitempty"`
 	CreatedAt     time.Time       `json:"createdAt"`
+	UpdatedAt     time.Time       `json:"updatedAt,omitempty"`
 	Payload       map[string]any  `json:"payload,omitempty"`
 }
 
+type FlashSaleConfig struct {
+	IsActive   bool     `json:"isActive"`
+	StartTime  string   `json:"startTime"`
+	EndTime    string   `json:"endTime"`
+	Title      string   `json:"title,omitempty"`
+	ProductIDs []string `json:"productIds"`
+}
+
+type TrendingConfig struct {
+	IsActive   bool     `json:"isActive"`
+	Title      string   `json:"title,omitempty"`
+	ProductIDs []string `json:"productIds"`
+}
+
 type CampaignConfig struct {
-	FlashSale struct {
-		IsActive   bool     `json:"isActive"`
-		StartTime  string   `json:"startTime"`
-		EndTime    string   `json:"endTime"`
-		Title      string   `json:"title"`
-		ProductIDs []string `json:"productIds"`
-	} `json:"flashSale"`
-	Trending struct {
-		Title      string   `json:"title"`
-		ProductIDs []string `json:"productIds"`
-	} `json:"trending"`
+	FlashSale FlashSaleConfig `json:"flashSale"`
+	Trending  TrendingConfig  `json:"trending"`
+}
+
+type AuditLog struct {
+	ID         string         `json:"id"`
+	Actor      string         `json:"actor"`
+	Action     string         `json:"action"`
+	EntityType string         `json:"entityType"`
+	EntityID   string         `json:"entityId"`
+	Details    map[string]any `json:"details,omitempty"`
+	CreatedAt  time.Time      `json:"createdAt"`
+}
+
+type AdminStats struct {
+	TotalProducts      int   `json:"totalProducts"`
+	PublishedProducts  int   `json:"publishedProducts"`
+	OutOfStockProducts int   `json:"outOfStockProducts"`
+	FlashDealCount     int   `json:"flashDealCount"`
+	BestSellerCount    int   `json:"bestSellerCount"`
+	TotalLeads         int   `json:"totalLeads"`
+	NewLeads           int   `json:"newLeads"`
+	ContactedLeads     int   `json:"contactedLeads"`
+	DispatchedLeads    int   `json:"dispatchedLeads"`
+	DeliveredLeads     int   `json:"deliveredLeads"`
+	LeadsPipelineLKR   int64 `json:"leadsPipelineLkr"`
+	PendingReviews     int   `json:"pendingReviews"`
+	ApprovedReviews    int   `json:"approvedReviews"`
+	FlatDeliveryFee    int   `json:"flatDeliveryFee"`
+	PostgresConnected  bool  `json:"postgresConnected"`
+	RedisConnected     bool  `json:"redisConnected"`
 }

@@ -21,7 +21,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	log.Printf("Starting Tyrelink Enterprise API on port :%s", cfg.Port)
+	log.Printf("Starting Tyrelink Enterprise API on port :%s (env=%s)", cfg.Port, cfg.Env)
 
 	// 1. Connect Database (Postgres with connection pool or memory fallback)
 	db := database.Connect(ctx, cfg.DatabaseURL)
@@ -32,6 +32,7 @@ func main() {
 
 	// 2. Connect Cache (Redis or in-memory fallback)
 	redisCache := cache.New(cfg.RedisURL)
+	defer func() { _ = redisCache.Close() }()
 
 	// 3. Initialize Middleware
 	mw := middleware.New(cfg)
@@ -46,28 +47,41 @@ func main() {
 	mux.HandleFunc("GET /health", h.Health)
 	mux.HandleFunc("GET /v1/products", h.GetProducts)
 	mux.HandleFunc("GET /v1/products/{id}", h.GetProductByID)
-	mux.HandleFunc("POST /v1/order-leads", h.CreateOrderLead)
-
 	mux.HandleFunc("GET /v1/products/{id}/reviews", h.GetReviews)
 	mux.HandleFunc("POST /v1/products/{id}/reviews", h.CreateReview)
+	mux.HandleFunc("POST /v1/order-leads", h.CreateOrderLead)
 	mux.HandleFunc("GET /v1/delivery-rates", h.GetDeliveryRates)
-	mux.HandleFunc("GET /v1/admin/reviews", mw.RequireAdmin(h.GetReviews))
-	mux.HandleFunc("PUT /v1/admin/reviews/{id}", mw.RequireAdmin(h.ModerateReview))
-	mux.HandleFunc("PUT /v1/admin/delivery-rates", mw.RequireAdmin(h.SaveDeliveryRate))
+	mux.HandleFunc("GET /v1/campaigns", h.GetCampaigns)
 
-	mux.HandleFunc("GET /v1/admin/catalog", mw.RequireAdmin(h.AdminCatalog))
-	mux.HandleFunc("PUT /v1/admin/catalog", mw.RequireAdmin(h.AdminBulkCatalog))
-	// Admin Auth
-	mux.HandleFunc("POST /v1/admin/login", h.AdminLogin)
+	// Admin Auth (with strict brute-force rate limit on login)
+	mux.HandleFunc("POST /v1/admin/login", mw.LoginRateLimit(h.AdminLogin))
+	mux.HandleFunc("POST /v1/admin/logout", h.AdminLogout)
 	mux.HandleFunc("GET /v1/admin/verify", mw.RequireAdmin(h.AdminVerify))
 
-	// Protected Admin Product Management
+	// Protected Admin Dashboard, Stats & Audit Trail
+	mux.HandleFunc("GET /v1/admin/stats", mw.RequireAdmin(h.GetAdminStats))
+	mux.HandleFunc("GET /v1/admin/audit-logs", mw.RequireAdmin(h.GetAdminAuditLogs))
+
+	// Protected Admin Product & Catalog Management
+	mux.HandleFunc("GET /v1/admin/catalog", mw.RequireAdmin(h.AdminCatalog))
+	mux.HandleFunc("PUT /v1/admin/catalog", mw.RequireAdmin(h.AdminBulkCatalog))
 	mux.HandleFunc("POST /v1/admin/products", mw.RequireAdmin(h.AdminCreateProduct))
 	mux.HandleFunc("PUT /v1/admin/products/{id}", mw.RequireAdmin(h.AdminUpdateProduct))
 	mux.HandleFunc("DELETE /v1/admin/products/{id}", mw.RequireAdmin(h.AdminDeleteProduct))
 
 	// Protected Admin Order Leads & CRM
 	mux.HandleFunc("GET /v1/admin/leads", mw.RequireAdmin(h.GetAdminLeads))
+	mux.HandleFunc("PUT /v1/admin/leads/{id}", mw.RequireAdmin(h.UpdateAdminLead))
+	mux.HandleFunc("DELETE /v1/admin/leads/{id}", mw.RequireAdmin(h.DeleteAdminLead))
+
+	// Protected Admin Campaigns (Flash Deals & Trending)
+	mux.HandleFunc("PUT /v1/admin/campaigns", mw.RequireAdmin(h.SaveCampaigns))
+
+	// Protected Admin Reviews & Flat Delivery Rate
+	mux.HandleFunc("GET /v1/admin/reviews", mw.RequireAdmin(h.GetReviews))
+	mux.HandleFunc("PUT /v1/admin/reviews/{id}", mw.RequireAdmin(h.ModerateReview))
+	mux.HandleFunc("DELETE /v1/admin/reviews/{id}", mw.RequireAdmin(h.DeleteReview))
+	mux.HandleFunc("PUT /v1/admin/delivery-rates", mw.RequireAdmin(h.SaveDeliveryRate))
 
 	// Chain Middlewares: CORS -> Security Headers -> Rate Limiter -> Request Logging
 	handler := mw.CORS(mw.SecurityHeaders(mw.RateLimit(mw.Logging(mux))))

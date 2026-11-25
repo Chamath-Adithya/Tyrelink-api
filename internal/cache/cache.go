@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ type Cache interface {
 	Delete(ctx context.Context, keys ...string) error
 	FlushPattern(ctx context.Context, pattern string) error
 	IsRedis() bool
+	Close() error
 }
 
 type memoryEntry struct {
@@ -47,6 +49,7 @@ func New(redisURL string) Cache {
 				log.Println("Connected to Redis cache at", opt.Addr)
 				return c
 			}
+			_ = rdb.Close()
 		}
 	}
 
@@ -56,6 +59,13 @@ func New(redisURL string) Cache {
 
 func (c *hybridCache) IsRedis() bool {
 	return c.isRedis
+}
+
+func (c *hybridCache) Close() error {
+	if c.rdb != nil {
+		return c.rdb.Close()
+	}
+	return nil
 }
 
 func (c *hybridCache) Get(ctx context.Context, key string, dest any) bool {
@@ -121,7 +131,7 @@ func (c *hybridCache) Delete(ctx context.Context, keys ...string) error {
 
 func (c *hybridCache) FlushPattern(ctx context.Context, pattern string) error {
 	if c.isRedis && c.rdb != nil {
-		iter := c.rdb.Scan(ctx, 0, pattern, 0).Iterator()
+		iter := c.rdb.Scan(ctx, 0, pattern, 100).Iterator()
 		var keys []string
 		for iter.Next(ctx) {
 			keys = append(keys, iter.Val())
@@ -131,9 +141,17 @@ func (c *hybridCache) FlushPattern(ctx context.Context, pattern string) error {
 		}
 	}
 
+	prefix := strings.TrimSuffix(pattern, "*")
 	c.mu.Lock()
-	c.memoryData = make(map[string]memoryEntry)
+	if pattern == "*" || prefix == "" {
+		c.memoryData = make(map[string]memoryEntry)
+	} else {
+		for k := range c.memoryData {
+			if strings.HasPrefix(k, prefix) {
+				delete(c.memoryData, k)
+			}
+		}
+	}
 	c.mu.Unlock()
 	return nil
 }
-

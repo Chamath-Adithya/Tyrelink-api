@@ -11,10 +11,11 @@ import (
 )
 
 type DB struct {
-	Pool        *pgxpool.Pool
-	mu          sync.RWMutex
-	memoryItems map[string]models.Product
-	memoryLeads []models.OrderLead
+	Pool            *pgxpool.Pool
+	mu              sync.RWMutex
+	memoryItems     map[string]models.Product
+	memoryLeads     []models.OrderLead
+	memoryCampaigns models.CampaignConfig
 }
 
 func Connect(ctx context.Context, dsn string) *DB {
@@ -23,7 +24,6 @@ func Connect(ctx context.Context, dsn string) *DB {
 		memoryLeads: make([]models.OrderLead, 0),
 	}
 
-	// Pre-populate in-memory data for offline/standalone mode
 	seedMemoryData(db)
 
 	if dsn == "" {
@@ -51,6 +51,7 @@ func Connect(ctx context.Context, dsn string) *DB {
 	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := pool.Ping(pingCtx); err != nil {
+		pool.Close()
 		log.Printf("PostgreSQL ping failed: %v. Running in memory mode.", err)
 		return db
 	}
@@ -70,7 +71,7 @@ func (db *DB) IsPostgres() bool {
 	return db.Pool != nil
 }
 
-// Memory getters/setters for standalone execution
+// GetMemoryProducts returns all published products (or all products when includeUnpublished is true)
 func (db *DB) GetMemoryProducts() []models.Product {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -83,12 +84,23 @@ func (db *DB) GetMemoryProducts() []models.Product {
 	return res
 }
 
+func (db *DB) GetAllMemoryProducts() []models.Product {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	res := make([]models.Product, 0, len(db.memoryItems))
+	for _, p := range db.memoryItems {
+		res = append(res, p)
+	}
+	return res
+}
+
 func (db *DB) GetMemoryProductByID(idOrSlug string) (*models.Product, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	for _, p := range db.memoryItems {
-		if p.ID == idOrSlug || p.Slug == idOrSlug {
-			return &p, true
+		if (p.ID == idOrSlug || p.Slug == idOrSlug) && p.Published {
+			cp := p
+			return &cp, true
 		}
 	}
 	return nil, false
@@ -101,15 +113,25 @@ func (db *DB) SaveMemoryProduct(p models.Product) {
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = p.UpdatedAt
 	}
+	if p.Title == "" {
+		p.Title = p.Name
+	}
+	if p.Name == "" {
+		p.Name = p.Title
+	}
 	db.memoryItems[p.ID] = p
 }
 
-func (db *DB) DeleteMemoryProduct(id string) bool {
+func (db *DB) DeleteMemoryProduct(id string, permanent bool) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	p, ok := db.memoryItems[id]
 	if !ok {
 		return false
+	}
+	if permanent {
+		delete(db.memoryItems, id)
+		return true
 	}
 	p.Published = false
 	p.UpdatedAt = time.Now().UTC()
@@ -131,11 +153,51 @@ func (db *DB) GetMemoryLeads() []models.OrderLead {
 	return res
 }
 
+func (db *DB) UpdateMemoryLead(id, status, notes string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	for i := range db.memoryLeads {
+		if db.memoryLeads[i].ID == id {
+			if status != "" {
+				db.memoryLeads[i].Status = status
+			}
+			db.memoryLeads[i].AdminNotes = notes
+			db.memoryLeads[i].UpdatedAt = time.Now().UTC()
+			return true
+		}
+	}
+	return false
+}
+
+func (db *DB) DeleteMemoryLead(id string) bool {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	for i := range db.memoryLeads {
+		if db.memoryLeads[i].ID == id {
+			db.memoryLeads = append(db.memoryLeads[:i], db.memoryLeads[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+func (db *DB) GetMemoryCampaigns() models.CampaignConfig {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.memoryCampaigns
+}
+
+func (db *DB) SaveMemoryCampaigns(cfg models.CampaignConfig) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.memoryCampaigns = cfg
+}
+
 func seedMemoryData(db *DB) {
 	seeds := []models.Product{
 		{
 			ID: "tl-ceat-milaze-155", SKU: "TL-CAR-155-01", Slug: "ceat-milaze-155-70-r13",
-			Brand: "CEAT", Name: "CEAT Milaze 155/70 R13", SinhalaTitle: "CEAT Milaze කාර් ටයරය",
+			Brand: "CEAT", Name: "CEAT Milaze 155/70 R13", Title: "CEAT Milaze 155/70 R13", SinhalaTitle: "CEAT Milaze කාර් ටයරය",
 			Category: "car-tyres", Size: "155/70 R13", PriceMinor: 1850000, Price: 18500,
 			OriginalPriceMinor: 2050000, OriginalPrice: 20500, Currency: "LKR",
 			FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
@@ -146,7 +208,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-dsi-sdrive-185", SKU: "TL-CAR-185-02", Slug: "dsi-s-drive-185-65-r15",
-			Brand: "DSI", Name: "DSI S-Drive 185/65 R15", SinhalaTitle: "DSI S-Drive කාර් ටයරය",
+			Brand: "DSI", Name: "DSI S-Drive 185/65 R15", Title: "DSI S-Drive 185/65 R15", SinhalaTitle: "DSI S-Drive කාර් ටයරය",
 			Category: "car-tyres", Size: "185/65 R15", PriceMinor: 2990000, Price: 29900,
 			OriginalPriceMinor: 3250000, OriginalPrice: 32500, Currency: "LKR",
 			FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
@@ -157,7 +219,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-michelin-xm2-195", SKU: "TL-CAR-195-03", Slug: "michelin-energy-xm2-195-65-r15",
-			Brand: "Michelin", Name: "Michelin Energy XM2+ 195/65 R15", SinhalaTitle: "මිචෙලින් කාර් ටයරය",
+			Brand: "Michelin", Name: "Michelin Energy XM2+ 195/65 R15", Title: "Michelin Energy XM2+ 195/65 R15", SinhalaTitle: "මිචෙලින් කාර් ටයරය",
 			Category: "car-tyres", Size: "195/65 R15", PriceMinor: 5450000, Price: 54500,
 			OriginalPriceMinor: 5800000, OriginalPrice: 58000, Currency: "LKR",
 			FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
@@ -168,7 +230,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-dunlop-at5-265", SKU: "TL-SUV-265-01", Slug: "dunlop-grandtrek-at5-265-65-r17",
-			Brand: "Dunlop", Name: "Dunlop Grandtrek AT5 265/65 R17",
+			Brand: "Dunlop", Name: "Dunlop Grandtrek AT5 265/65 R17", Title: "Dunlop Grandtrek AT5 265/65 R17",
 			Category: "suv-4x4", Size: "265/65 R17", PriceMinor: 7800000, Price: 78000,
 			OriginalPriceMinor: 8350000, OriginalPrice: 83500, Currency: "LKR",
 			FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
@@ -179,7 +241,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-bridgestone-dueler-265", SKU: "TL-SUV-265-02", Slug: "bridgestone-dueler-ht-265-65-r17",
-			Brand: "Bridgestone", Name: "Bridgestone Dueler H/T 265/65 R17",
+			Brand: "Bridgestone", Name: "Bridgestone Dueler H/T 265/65 R17", Title: "Bridgestone Dueler H/T 265/65 R17",
 			Category: "suv-4x4", Size: "265/65 R17", PriceMinor: 8600000, Price: 86000,
 			Currency: "LKR", FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
 			Specs:            map[string]any{"Size": "265/65 R17", "Load index": "112S", "Terrain": "Highway terrain", "Warranty": "5 years"},
@@ -189,7 +251,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-ceat-zoom-90", SKU: "TL-MOTO-90-01", Slug: "ceat-zoom-plus-90-90-17",
-			Brand: "CEAT", Name: "CEAT Zoom Plus 90/90-17",
+			Brand: "CEAT", Name: "CEAT Zoom Plus 90/90-17", Title: "CEAT Zoom Plus 90/90-17",
 			Category: "motorcycle", Size: "90/90-17", PriceMinor: 1290000, Price: 12900,
 			OriginalPriceMinor: 1400000, OriginalPrice: 14000, Currency: "LKR",
 			FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
@@ -200,7 +262,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-michelin-pilot-100", SKU: "TL-MOTO-100-02", Slug: "michelin-pilot-street-2-100-80-17",
-			Brand: "Michelin", Name: "Michelin Pilot Street 2 100/80-17",
+			Brand: "Michelin", Name: "Michelin Pilot Street 2 100/80-17", Title: "Michelin Pilot Street 2 100/80-17",
 			Category: "motorcycle", Size: "100/80-17", PriceMinor: 2450000, Price: 24500,
 			Currency: "LKR", FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
 			Specs:            map[string]any{"Size": "100/80-17", "Fitment": "Rear — confirm with us", "Type": "Tubeless", "Warranty": "5 years"},
@@ -210,7 +272,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-hankook-vantra-195", SKU: "TL-COMM-195-01", Slug: "hankook-vantra-195-70-r15c",
-			Brand: "Hankook", Name: "Hankook Vantra LT 195/70 R15C",
+			Brand: "Hankook", Name: "Hankook Vantra LT 195/70 R15C", Title: "Hankook Vantra LT 195/70 R15C",
 			Category: "commercial", Size: "195/70 R15C", PriceMinor: 4790000, Price: 47900,
 			Currency: "LKR", FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
 			Specs:            map[string]any{"Size": "195/70 R15C", "Rating": "104/102R", "Construction": "Commercial radial", "Warranty": "4 years"},
@@ -220,7 +282,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-valve-kit", SKU: "TL-ACC-VALVE-01", Slug: "tubeless-valve-service-kit",
-			Brand: "Tyrelink", Name: "Tubeless Valve Service Kit",
+			Brand: "Tyrelink", Name: "Tubeless Valve Service Kit", Title: "Tubeless Valve Service Kit",
 			Category: "wheels", Size: "Standard", PriceMinor: 185000, Price: 1850,
 			Currency: "LKR", FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
 			Specs:            map[string]any{"Contents": "4 valves and caps", "Fitment": "Tubeless passenger wheels", "Use": "Tyre service accessory"},
@@ -230,7 +292,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-air-compressor", SKU: "TL-EQ-COMP-01", Slug: "garage-air-compressor-100l",
-			Brand: "Tyrelink Pro", Name: "100L Garage Air Compressor",
+			Brand: "Tyrelink Pro", Name: "100L Garage Air Compressor", Title: "100L Garage Air Compressor",
 			Category: "garage-tools", Size: "100L", PriceMinor: 18500000, Price: 185000,
 			Currency: "LKR", FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
 			Specs:            map[string]any{"Tank": "100 litres", "Use": "Workshop air supply", "Support": "Installation guidance included", "Warranty": "1 year"},
@@ -240,7 +302,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-wheel-balancer", SKU: "TL-EQ-BAL-01", Slug: "digital-wheel-balancer",
-			Brand: "Tyrelink Pro", Name: "Digital Wheel Balancer",
+			Brand: "Tyrelink Pro", Name: "Digital Wheel Balancer", Title: "Digital Wheel Balancer",
 			Category: "garage-equipment", Size: "Digital Universal", PriceMinor: 48500000, Price: 485000,
 			Currency: "LKR", FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
 			Specs:            map[string]any{"Application": "Passenger and light-commercial wheels", "Service": "Installation and training", "Warranty": "1 year"},
@@ -250,7 +312,7 @@ func seedMemoryData(db *DB) {
 		},
 		{
 			ID: "tl-tyre-changer", SKU: "TL-EQ-CHG-01", Slug: "semi-automatic-tyre-changer",
-			Brand: "Tyrelink Pro", Name: "Semi-Automatic Tyre Changer",
+			Brand: "Tyrelink Pro", Name: "Semi-Automatic Tyre Changer", Title: "Semi-Automatic Tyre Changer",
 			Category: "garage-equipment", Size: "Semi-Automatic", PriceMinor: 62500000, Price: 625000,
 			Currency: "LKR", FeaturedImage: "/hero-tyre.png", Images: []string{"/hero-tyre.png"},
 			Specs:            map[string]any{"Application": "Passenger and light-commercial tyres", "Service": "Installation and training", "Warranty": "1 year"},
@@ -258,10 +320,56 @@ func seedMemoryData(db *DB) {
 			StockCount:       1, InStock: true, IsBestSeller: true,
 			Warranty: "1 Year Equipment Warranty", Rating: 4.9, ReviewCount: 3, MaxOrderQuantity: 1, Published: true,
 		},
+		{
+			ID: "tl-impact-wrench-half", SKU: "TL-TOOL-WRENCH-01", Slug: "twin-hammer-air-impact-wrench",
+			Brand: "Tyrelink Pro", Name: `1/2" Twin Hammer Air Impact Wrench`, Title: `1/2" Twin Hammer Air Impact Wrench`,
+			Category: "garage-tools", Size: "1/2 inch Drive", PriceMinor: 1750000, Price: 17500,
+			OriginalPriceMinor: 1980000, OriginalPrice: 19800, Currency: "LKR",
+			FeaturedImage: "/images/legacy/wrenches-sri-lanka.webp", Images: []string{"/images/legacy/wrenches-sri-lanka.webp"},
+			Specs:            map[string]any{"Drive": "1/2 inch Square", "Mechanism": "Twin Hammer Pneumatic", "Vehicle": "Cars, SUVs & Light Vans", "Warranty": "1 year"},
+			ShortDescription: "High-torque twin hammer pneumatic wrench built for fast lug nut removal in tyre bays.",
+			StockCount:       14, InStock: true, IsBestSeller: true, FlashDealDiscount: 12,
+			Warranty: "1 Year Workshop Warranty", Rating: 4.8, ReviewCount: 15, MaxOrderQuantity: 3, Published: true,
+		},
+		{
+			ID: "tl-nitrogen-inflator", SKU: "TL-EQ-N2-01", Slug: "digital-nitrogen-tyre-inflator",
+			Brand: "Tyrelink Pro", Name: "Digital Nitrogen Tyre Inflator", Title: "Digital Nitrogen Tyre Inflator",
+			Category: "garage-equipment", Size: "Digital Dual LED", PriceMinor: 14500000, Price: 145000,
+			OriginalPriceMinor: 15800000, OriginalPrice: 158000, Currency: "LKR",
+			FeaturedImage: "/images/legacy/nitrogen-machine.webp", Images: []string{"/images/legacy/nitrogen-machine.webp"},
+			Specs:            map[string]any{"Display": "Dual Digital LED", "Application": "Passenger & Commercial Bays", "Warranty": "1 year"},
+			ShortDescription: "Precision digital nitrogen tyre inflator for consistent pressure accuracy across workshop bays.",
+			StockCount:       3, InStock: true, IsFeatured: true, FlashDealDiscount: 8,
+			Warranty: "1 Year Equipment Warranty", Rating: 4.9, ReviewCount: 7, MaxOrderQuantity: 1, Published: true,
+		},
+		{
+			ID: "tl-tr13-valve-kit", SKU: "TL-ACC-TR13-01", Slug: "heavy-duty-tr13-valve-set",
+			Brand: "Tyrelink", Name: "Heavy-Duty TR13 Tubeless Valve Set", Title: "Heavy-Duty TR13 Tubeless Valve Set",
+			Category: "wheels", Size: "TR13 Standard", PriceMinor: 240000, Price: 2400,
+			Currency: "LKR", FeaturedImage: "/images/legacy/valves-sri-lanka.webp", Images: []string{"/images/legacy/valves-sri-lanka.webp"},
+			Specs:            map[string]any{"Type": "TR13 Snap-in Brass Core", "Vehicle": "All Passenger & Van Rims", "Warranty": "6 months"},
+			ShortDescription: "Heavy-duty brass-core snap-in TR13 valves engineered for long-lasting rim airtightness.",
+			StockCount:       50, InStock: true,
+			Warranty: "6 Month Replacement Warranty", Rating: 4.8, ReviewCount: 19, MaxOrderQuantity: 10, Published: true,
+		},
 	}
 
 	for _, s := range seeds {
 		db.memoryItems[s.ID] = s
 	}
-}
 
+	var cam models.CampaignConfig
+	cam.FlashSale = models.FlashSaleConfig{
+		IsActive:   true,
+		StartTime:  "2026-11-01T00:00:00.000Z",
+		EndTime:    "2026-11-30T23:59:59.000Z",
+		Title:      "Today's Flash Deals",
+		ProductIDs: []string{"tl-dunlop-at5-265", "tl-ceat-zoom-90", "tl-air-compressor", "tl-michelin-pilot-100"},
+	}
+	cam.Trending = models.TrendingConfig{
+		IsActive:   true,
+		Title:      "Trending & Best Sellers",
+		ProductIDs: []string{"tl-michelin-xm2-195", "tl-bridgestone-dueler-265", "tl-michelin-pilot-100", "tl-hankook-vantra-195", "tl-valve-kit"},
+	}
+	db.memoryCampaigns = cam
+}
